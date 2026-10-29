@@ -1,0 +1,53 @@
+Loading audio: meeting_mono.wav
+  Loaded 268715 samples (16.79s)
+Loading Community-1 CoreML + native VBx pipeline...
+  [0%] Downloading Community-1 bundle...
+  [0%] Downloading Community-1 bundle...
+  [0%] Downloading Community-1 bundle...
+  [0%] Downloading Community-1 bundle...
+  [0%] Downloading Community-1 bundle...
+  [61%] Downloading Community-1 bundle...
+  [61%] Downloading Community-1 bundle...
+  [61%] Downloading Community-1 bundle...
+  [61%] Downloading Community-1 bundle...
+  [61%] Downloading Community-1 bundle...
+  [75%] Downloading Community-1 bundle...
+  [75%] Validating Community-1 bundle...
+  [81%] Loading Community-1 Core ML models...
+  [100%] Ready
+Running diarization (Community-1)...
+{
+  "segments" : [
+    {
+      "end" : 3.794,
+      "duration" : 3.7629999999999999,
+      "speaker" : 0,
+      "start" : 0.031
+    },
+    {
+      "start" : 4.5700000000000003,
+      "speaker" : 1,
+      "duration" : 0.439,
+      "end" : 5.0090000000000003
+    },
+    {
+      "end" : 7.6079999999999997,
+      "duration" : 2.5310000000000001,
+      "speaker" : 1,
+      "start" : 5.077
+    },
+    {
+      "end" : 12.298999999999999,
+      "speaker" : 0,
+      "start" : 8.3840000000000003,
+      "duration" : 3.915
+    },
+    {
+      "start" : 13.042,
+      "duration" : 3.004,
+      "speaker" : 1,
+      "end" : 16.045000000000002
+    }
+  ],
+  "num_speakers" : 2
+}

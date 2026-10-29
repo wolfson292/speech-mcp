@@ -1,0 +1,11 @@
+Loading audio: meeting_mono.wav
+  Loaded 268715 samples (16.79s)
+Loading Cohere Transcribe model: aufklarer/Cohere-Transcribe-2B-MLX-5bit
+  [0%] Downloading
+  [99%] Downloading
+  [99%] Downloading
+  [99%] Downloading
+  [100%] Downloading
+Transcribing...
+Result: Thanks for joining. I wanted to walk through the quarterly numbers. Sure, I pulled the regional breakdown before the call. Good, start with the southeast. That is the one I am worried about. Southeast is down 11% quarter over quarter.
+  Time: 6.19s, RTF: 0.368
