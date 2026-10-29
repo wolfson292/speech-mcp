@@ -187,10 +187,42 @@ def slice_wav(src: Path, dst: Path, start: float, end: float, pad: float = 0.2) 
 # --------------------------------------------------------------------------
 
 
+# `speech transcribe` has no JSON mode. stdout interleaves progress logs with a
+# "Result: <text>" line, then a "  Time: ..." line (and for moss a "Segments:"
+# block). See docs/cli-reference.md.
+RESULT_END = re.compile(r"^\s*(Time:|Segments:)")
+
+
+def parse_result(stdout: str) -> str:
+    """Pull the transcript out of `speech transcribe` stdout."""
+    lines = stdout.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("Result:"):
+            parts = [line[len("Result:"):]]
+            for nxt in lines[i + 1:]:
+                if RESULT_END.match(nxt):
+                    break
+                parts.append(nxt)
+            return " ".join(" ".join(parts).split())
+    tail = stdout.strip()[-400:]
+    raise RuntimeError(f"speech transcribe printed no 'Result:' line. Output tail: {tail}")
+
+
+def extract_json(stdout: str) -> Any:
+    """`speech diarize --json` prints progress lines before the JSON on stdout."""
+    for m in re.finditer(r"^[\[{]", stdout, re.M):
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(stdout, m.start())
+        except json.JSONDecodeError:
+            continue  # a progress line such as "[61%] Downloading..."
+        return obj
+    raise RuntimeError(f"No JSON found in speech output: {stdout.strip()[-400:]}")
+
+
 def cli_transcribe(audio: Path, engine: str, extra: list[str] | None = None) -> str:
     cmd = [speech_bin(), "transcribe", str(audio), "--engine", engine]
     cmd += extra or []
-    return " ".join(run_cmd(cmd).split()).strip()
+    return parse_result(run_cmd(cmd))
 
 
 def cli_diarize(audio: Path, engine: str = "community1",
@@ -205,7 +237,7 @@ def cli_diarize(audio: Path, engine: str = "community1",
             cmd += ["--min-speakers", str(min_speakers)]
         if max_speakers:
             cmd += ["--max-speakers", str(max_speakers)]
-    return normalize_segments(json.loads(run_cmd(cmd)))
+    return normalize_segments(extract_json(run_cmd(cmd)))
 
 
 def _pick(d: dict, *keys):
@@ -215,8 +247,25 @@ def _pick(d: dict, *keys):
     return None
 
 
+def speaker_label(spk: Any) -> str:
+    """Diarize emits 0-based ints. Render them like MOSS does (S01, S02, ...)."""
+    if isinstance(spk, bool) or spk is None:
+        return "S?"
+    if isinstance(spk, int):
+        return f"S{spk + 1:02d}"
+    if isinstance(spk, str) and spk.isdigit():
+        return f"S{int(spk) + 1:02d}"
+    return str(spk)
+
+
 def normalize_segments(raw: Any) -> list[dict]:
-    """Tolerate schema differences between engines and releases."""
+    """Normalize `speech diarize --json` output.
+
+    Real schema (speech 0.0.28, every engine):
+        {"num_speakers": 2,
+         "segments": [{"start": 0.03, "end": 3.79, "duration": 3.76, "speaker": 0}]}
+    Other spellings are tolerated in case a release changes them.
+    """
     if isinstance(raw, dict):
         for key in ("segments", "results", "diarization", "speakers", "turns"):
             if key in raw:
@@ -228,25 +277,39 @@ def normalize_segments(raw: Any) -> list[dict]:
             continue
         start = _pick(s, "start", "startTime", "start_time", "begin", "from")
         end = _pick(s, "end", "endTime", "end_time", "stop", "to")
+        if end is None and start is not None and s.get("duration") is not None:
+            end = float(start) + float(s["duration"])
         spk = _pick(s, "speaker", "speakerId", "speaker_id", "label", "id")
         if start is None or end is None:
             continue
         segs.append({
             "start": float(start),
             "end": float(end),
-            "speaker": str(spk) if spk is not None else "S?",
+            "speaker": speaker_label(spk),
         })
     segs.sort(key=lambda x: x["start"])
     return segs
 
 
-# MOSS emits speaker-attributed, timestamped text. Handle both the
-# [start][S01]text[end] stream form and plain [S01] line form.
+# MOSS prints a "Segments:" block after the Result line, one turn per line:
+#   "  [0.07s-3.86s][S01] Thanks for joining."
+# The stream form [0.48][S01]text[1.66] and bare "[S01] text" lines are kept
+# as fallbacks in case a release changes the format.
+MOSS_SEGMENT = re.compile(
+    r"^\s*\[(\d+(?:\.\d+)?)s?\s*-\s*(\d+(?:\.\d+)?)s?\]\s*\[(S\d+)\]\s*(.*?)\s*$", re.M
+)
 MOSS_STREAM = re.compile(r"\[(\d+(?:\.\d+)?)\]\[(S\d+)\](.*?)\[(\d+(?:\.\d+)?)\]", re.S)
 MOSS_LINE = re.compile(r"^\s*(?:\[(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\]\s*)?\[?(S\d+)\]?[:\s]\s*(.+?)\s*$")
 
 
 def parse_moss(text: str) -> list[dict]:
+    turns = [
+        {"start": float(a), "end": float(b), "speaker": spk, "text": " ".join(t.split())}
+        for a, b, spk, t in MOSS_SEGMENT.findall(text)
+        if t.strip()
+    ]
+    if turns:
+        return turns
     turns = [
         {"start": float(a), "end": float(d), "speaker": b, "text": " ".join(c.split())}
         for a, b, c, d in MOSS_STREAM.findall(text)
