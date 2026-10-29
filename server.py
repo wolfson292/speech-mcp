@@ -7,13 +7,13 @@ separation without needing shell access or a folder grant.
 
 Transports:
     python server.py                      # stdio (Claude Desktop, Claude Code)
-    python server.py --http --port 8420   # streamable HTTP (remote clients)
+    python server.py --http --port 8420   # streamable HTTP, loopback only
 
 Environment:
     SPEECH_BIN          path to the speech binary (default: search PATH)
     SPEECH_MCP_ROOTS    colon-separated directories that may be read
                         (default: ~/Documents:~/Downloads:~/Movies:~/Music:~/Desktop)
-    SPEECH_MCP_TOKEN    bearer token required in HTTP mode (strongly recommended)
+    SPEECH_MCP_BATCH    set to 0 to disable the transcribe-batch warm path
     QWEN3_CACHE_DIR     model weight cache (leave unset to use the shared cache)
 """
 
@@ -31,6 +31,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -53,6 +54,16 @@ CANDIDATE_BINARIES = [
 
 # Extensions speech accepts without conversion.
 NATIVE_EXTS = {".wav", ".m4a", ".mp3", ".caf"}
+
+
+# `speech transcribe --engine` values usable for a plain transcript (moss is a
+# strategy of its own). `speech diarize --engine` values.
+TranscribeEngine = Literal[
+    "cohere", "qwen3", "voxtral", "parakeet", "nemotron", "omnilingual",
+    "whisper", "qwen3-coreml", "qwen3-coreml-full",
+]
+DiarizeEngine = Literal["community1", "pyannote", "sortformer", "nemotron3"]
+LOOPBACK = ("127.0.0.1", "::1", "localhost")
 
 
 def speech_bin() -> str:
@@ -650,7 +661,7 @@ def transcribe(
     speakers: int | None = None,
     mode: Literal["auto", "moss", "two_stage", "stereo", "plain"] = "auto",
     output: Literal["text", "srt", "json", "plain"] = "text",
-    engine: str = "cohere",
+    engine: TranscribeEngine = "cohere",
     min_speakers: int | None = None,
     max_speakers: int | None = None,
     wait_seconds: int = 150,
@@ -671,6 +682,9 @@ def transcribe(
         output: "text" for timestamped speaker lines, "srt" for subtitles,
             "json" for structured turns, "plain" for text with no labels.
         engine: ASR engine for the two_stage, stereo, and plain modes.
+            "qwen3" transcribes all speaker turns in one warm process and is
+            much faster on long multi-speaker files. "cohere" is slower there
+            (one process per turn) but a little more accurate.
         wait_seconds: How long to wait inline. Past this a job id is returned
             and you poll with transcription_status.
 
@@ -687,7 +701,7 @@ def transcribe(
     )
     try:
         future.result(timeout=max(5, wait_seconds))
-    except Exception:
+    except FutureTimeout:
         dur = probe_duration(audio)
         return (
             f"Still running after {wait_seconds}s (file is {dur / 60:.1f} min). "
@@ -718,7 +732,7 @@ def transcription_status(job_id: str) -> str:
 def diarize_only(
     path: str,
     speakers: int | None = None,
-    engine: str = "community1",
+    engine: DiarizeEngine = "community1",
 ) -> str:
     """Return speaker segments with no transcription, as JSON.
 
@@ -776,19 +790,18 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="MCP server for local speech-to-text")
     ap.add_argument("--http", action="store_true",
                     help="serve streamable HTTP instead of stdio")
-    ap.add_argument("--host", default="127.0.0.1",
-                    help="HTTP bind address (default: loopback only)")
+    ap.add_argument("--host", default="127.0.0.1", choices=LOOPBACK,
+                    help="HTTP bind address, loopback only (default: 127.0.0.1)")
     ap.add_argument("--port", type=int, default=8420)
     ap.add_argument("--path", default="/mcp")
     args = ap.parse_args()
 
     if args.http:
-        if args.host not in ("127.0.0.1", "::1", "localhost") and not os.environ.get("SPEECH_MCP_TOKEN"):
-            sys.exit(
-                "Refusing to bind a non-loopback address without SPEECH_MCP_TOKEN set. "
-                "This server reads files from disk, so an unauthenticated public "
-                "bind is a file-disclosure endpoint."
-            )
+        # This server reads files from disk and has no authentication, so a
+        # routable bind is a file-disclosure endpoint. argparse already limits
+        # --host to LOOPBACK; this is a second check in case that changes.
+        if args.host not in LOOPBACK:
+            sys.exit("Refusing to bind a non-loopback address.")
         mcp.run(transport="http", host=args.host, port=args.port, path=args.path)
     else:
         mcp.run()
