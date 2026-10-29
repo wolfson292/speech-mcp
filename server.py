@@ -345,43 +345,116 @@ def coalesce(segments: list[dict], gap: float = 0.75) -> list[dict]:
     return merged
 
 
-def transcribe_turns(audio: Path, segments: list[dict], engine: str,
-                     workdir: Path, min_dur: float = 0.4,
-                     offset: float = 0.0) -> list[dict]:
-    """Slice at speaker turns and transcribe each. No alignment, no length cap."""
-    out = []
+# `speech transcribe-batch` loads the model once for a whole directory. It only
+# supports these engines. speech-server would be the other warm option, but on
+# speech 0.0.28 it ignores engine selection and always runs parakeet. See
+# docs/cli-reference.md.
+BATCH_ENGINES = {"qwen3", "parakeet"}
+
+
+def batch_enabled() -> bool:
+    return os.environ.get("SPEECH_MCP_BATCH", "1") not in ("0", "false", "no")
+
+
+def cli_transcribe_batch(clip_dir: Path, engine: str) -> dict[str, str]:
+    """Transcribe every .wav in clip_dir with one model load. Keyed by file stem."""
+    out = run_cmd([
+        speech_bin(), "transcribe-batch", str(clip_dir),
+        "--engine", engine, "--extensions", "wav", "--jsonl",
+    ])
+    texts: dict[str, str] = {}
+    for line in out.splitlines():
+        if not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if "file" in rec:
+            texts[str(rec["file"])] = " ".join(str(rec.get("text", "")).split())
+    return texts
+
+
+def plan_clips(audio: Path, segments: list[dict], clip_dir: Path, prefix: str,
+               min_dur: float = 0.4) -> list[tuple[Path, dict]]:
+    """Slice audio at coalesced speaker turns. Returns (clip, turn) pairs."""
+    clip_dir.mkdir(exist_ok=True)
+    clips = []
     for i, t in enumerate(coalesce(segments)):
         if t["end"] - t["start"] < min_dur:
             continue
-        clip = workdir / f"turn_{i:05d}.wav"
+        clip = clip_dir / f"{prefix}_{i:05d}.wav"
         slice_wav(audio, clip, t["start"], t["end"])
+        clips.append((clip, t))
+    return clips
+
+
+def transcribe_clips(clips: list[tuple[Path, dict]], engine: str,
+                     clip_dir: Path) -> tuple[list[dict], str]:
+    """Transcribe turn clips, warm (one batch process) when the engine allows.
+
+    Falls back to one `speech transcribe` process per clip, which reloads the
+    model weights every time.
+    """
+    texts: dict[str, str] | None = None
+    path = "per-turn subprocess"
+    if engine in BATCH_ENGINES and batch_enabled() and clips:
         try:
+            texts = cli_transcribe_batch(clip_dir, engine)
+            path = "transcribe-batch, model loaded once"
+        except RuntimeError as exc:
+            path = f"per-turn subprocess (transcribe-batch failed: {str(exc)[:120]})"
+    out = []
+    for clip, t in clips:
+        if texts is not None and clip.stem in texts:
+            text = texts[clip.stem]
+        else:
             text = cli_transcribe(clip, engine)
-        finally:
-            clip.unlink(missing_ok=True)
+        clip.unlink(missing_ok=True)
         if text:
-            out.append({
-                "speaker": t["speaker"],
-                "start": t["start"] + offset,
-                "end": t["end"] + offset,
-                "text": text,
-            })
-    return out
+            out.append({"speaker": t["speaker"], "start": t["start"],
+                        "end": t["end"], "text": text})
+    return out, path
+
+
+# MOSS MLX defaults to 5120 output tokens. On a 22 min fixture that ran out at
+# 713 s (about 7.2 tokens per second of audio) and the CLI only printed a
+# warning, so half the meeting silently vanished. Budget from duration instead.
+MOSS_TOKENS_PER_SEC = 10
+MOSS_MIN_TOKENS = 5120
+MOSS_TRUNCATED = "generation stopped at maximumTokens"
 
 
 def strategy_moss(audio: Path, workdir: Path, **_) -> tuple[list[dict], str]:
     wav = audio if audio.suffix.lower() in NATIVE_EXTS else to_wav(audio, workdir / "in.wav")
+    dur = probe_duration(wav)
+    max_tokens = max(MOSS_MIN_TOKENS, int(dur * MOSS_TOKENS_PER_SEC))
     raw = run_cmd([
         speech_bin(), "transcribe", str(wav),
         "--engine", "moss", "--backend", "mlx",
         "--model", "int8", "--kv-cache", "fp16",
+        "--max-tokens", str(max_tokens),
     ])
+    warnings = []
+    if MOSS_TRUNCATED in raw:
+        warnings.append(f"WARNING: MOSS hit its {max_tokens}-token limit, transcript is "
+                        "truncated. Rerun with mode=two_stage for the full file")
     turns = parse_moss(raw)
     if not turns:
-        return ([{"speaker": "S01", "start": 0.0, "end": 0.0,
-                  "text": " ".join(raw.split())}],
-                "moss (speaker labels could not be parsed, returned as one block)")
-    return turns, "moss end-to-end, model-chosen speaker count"
+        try:
+            text = parse_result(raw)
+        except RuntimeError:
+            text = " ".join(raw.split())
+        warnings.append("WARNING: MOSS output could not be parsed into speaker turns, "
+                        "speaker attribution was lost and the text is one unlabeled "
+                        "block. Do not read this as a single speaker")
+        method = "moss; " + "; ".join(warnings)
+        return [{"speaker": "", "start": 0.0, "end": dur, "text": text}], method
+    n = len({t["speaker"] for t in turns})
+    method = f"moss end-to-end, model-chosen speaker count ({n} speakers)"
+    if warnings:
+        method += "; " + "; ".join(warnings)
+    return turns, method
 
 
 def strategy_two_stage(audio: Path, workdir: Path, engine: str = "cohere",
@@ -392,23 +465,27 @@ def strategy_two_stage(audio: Path, workdir: Path, engine: str = "cohere",
     segs = cli_diarize(wav, "community1", num_speakers, min_speakers, max_speakers)
     if not segs:
         raise RuntimeError("Diarization returned no segments.")
-    turns = transcribe_turns(wav, segs, engine, workdir)
+    clip_dir = workdir / "clips"
+    turns, path = transcribe_clips(plan_clips(wav, segs, clip_dir, "turn"), engine, clip_dir)
     n = len({s["speaker"] for s in segs})
-    return turns, f"community1 diarization ({n} speakers) + {engine} per turn"
+    return turns, f"community1 diarization ({n} speakers) + {engine} per turn ({path})"
 
 
 def strategy_stereo(audio: Path, workdir: Path, engine: str = "cohere",
                     **_) -> tuple[list[dict], str]:
     """Each channel is one party. Best possible attribution when it applies."""
-    turns: list[dict] = []
+    clip_dir = workdir / "clips"
+    clips: list[tuple[Path, dict]] = []
     for ch, label in ((0, "S01"), (1, "S02")):
         mono = to_wav(audio, workdir / f"ch{ch}.wav", channel=ch)
         segs = cli_diarize(mono, "community1", num_speakers=1)
         for s in segs:
             s["speaker"] = label
-        turns += transcribe_turns(mono, segs, engine, workdir)
+        clips += plan_clips(mono, segs, clip_dir, f"ch{ch}")
+    # Both channels go through one batch call so the model loads once.
+    turns, path = transcribe_clips(clips, engine, clip_dir)
     turns.sort(key=lambda t: t["start"])
-    return turns, "stereo channel split, one speaker per channel"
+    return turns, f"stereo channel split, one speaker per channel, {engine} ({path})"
 
 
 def strategy_plain(audio: Path, workdir: Path, engine: str = "cohere",
