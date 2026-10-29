@@ -144,6 +144,35 @@ def probe_channels(path: Path) -> int:
         return 0
 
 
+def mean_volume_db(path: Path, pan: str) -> float:
+    """Mean level of a mono mix of path, in dBFS, via ffmpeg volumedetect."""
+    ff, _ = require_ffmpeg()
+    proc = subprocess.run(
+        [ff, "-nostdin", "-hide_banner", "-i", str(path),
+         "-af", f"pan=mono|c0={pan},volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True, timeout=600, shell=False,
+    )
+    m = re.search(r"mean_volume:\s*(-?[\d.]+|-inf) dB", proc.stderr)
+    if proc.returncode != 0 or not m:
+        raise RuntimeError(f"ffmpeg volumedetect failed: {proc.stderr.strip()[-300:]}")
+    return float("-inf") if m.group(1) == "-inf" else float(m.group(1))
+
+
+def channels_distinct(path: Path, min_db: float = 10.0) -> bool:
+    """True when a stereo file's two channels carry different audio.
+
+    Many stereo files (phone memos, room recorders) are dual mono: the same mix
+    on both channels. Splitting those would transcribe the call twice under two
+    labels. If L-R is at least min_db quieter than L+R the channels are
+    effectively identical.
+    """
+    total = mean_volume_db(path, "0.5*c0+0.5*c1")
+    diff = mean_volume_db(path, "0.5*c0-0.5*c1")
+    if total == float("-inf"):
+        return False
+    return diff > total - min_db
+
+
 def probe_duration(path: Path) -> float:
     _, fp = require_ffmpeg()
     out = run_cmd(
@@ -501,7 +530,8 @@ def choose_strategy(audio: Path, mode: str, speakers: int | None) -> str:
     if mode != "auto":
         return mode
     try:
-        if probe_channels(audio) == 2 and (speakers is None or speakers == 2):
+        if (probe_channels(audio) == 2 and (speakers is None or speakers == 2)
+                and channels_distinct(audio)):
             return "stereo"
     except RuntimeError:
         pass

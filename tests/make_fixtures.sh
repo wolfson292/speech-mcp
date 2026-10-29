@@ -2,6 +2,8 @@
 # Build a two-speaker test conversation with macOS `say`.
 #   tests/fixtures/meeting_mono.wav    16 kHz mono, both voices mixed
 #   tests/fixtures/meeting_stereo.wav  16 kHz stereo, speaker A left, B right
+#   tests/fixtures/meeting_dualmono.wav  stereo with the same mix on both
+#                                        channels (must not pick "stereo")
 # Generated audio is gitignored; rerun this script to rebuild it.
 #
 # Speaker A defaults to Daniel, not Alex: Alex is not installed on every Mac,
@@ -57,4 +59,7 @@ ffmpeg -nostdin -loglevel error -y -i "$tmp/left.wav" -i "$tmp/right.wav" \
   -filter_complex "[0][1]join=inputs=2:channel_layout=stereo" \
   -ar 16000 -c:a pcm_s16le "$out/meeting_stereo.wav"
 
-echo "wrote $out/meeting_mono.wav and $out/meeting_stereo.wav"
+# Dual mono: two channels, identical content.
+ffmpeg -nostdin -loglevel error -y -i "$out/meeting_mono.wav" -ac 2 "$out/meeting_dualmono.wav"
+
+echo "wrote $out/meeting_mono.wav, meeting_stereo.wav, meeting_dualmono.wav"
