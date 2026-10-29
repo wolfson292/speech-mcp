@@ -1,0 +1,4 @@
+# Tests. jsonschema arrives with fastmcp but the smoke test imports it directly.
+-r requirements.txt
+pytest==9.2.0
+jsonschema==4.26.0

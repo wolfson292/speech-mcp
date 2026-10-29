@@ -1,0 +1,2 @@
+# Runtime. fastmcp is the standalone package, not mcp.server.fastmcp.
+fastmcp==4.1.4

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speech-mcp"
+version = "0.2.0"
+description = "MCP server exposing the local speech-swift install for transcription with speaker diarization"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["fastmcp==4.1.4"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "jsonschema==4.26.0"]
+
+[project.scripts]
+speech-mcp = "server:main"
+
+[tool.setuptools]
+py-modules = ["server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

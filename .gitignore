@@ -10,3 +10,4 @@ tests/fixtures/
 .DS_Store
 .serena/
 *.egg-info/
+build/
