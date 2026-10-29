@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.wav
+*.aiff
+*.m4a
+*.mp3
+tests/fixtures/
+.DS_Store
+.serena/
+*.egg-info/
